@@ -424,6 +424,12 @@ extension SettingsExport {
                     value: String(format: "%.0f", (preferences.maxDeltaBGthreshold as NSDecimalNumber).doubleValue * 100),
                     unit: "%"
                 )
+                addSetting(
+                    category: algorithmCategory,
+                    subcategory: smbSubcategory,
+                    name: String(localized: "IOB Limits SMBs and High Temps"),
+                    value: preferences.iobLimitsInsulinReq ? String(localized: "Enabled") : String(localized: "Disabled")
+                )
 
                 // Dynamic Settings
                 let dynamicSubcategory = String(localized: "Dynamic Settings")

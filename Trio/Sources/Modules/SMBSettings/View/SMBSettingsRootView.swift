@@ -355,6 +355,34 @@ extension SMBSettings {
                         Text("Note: This setting has a hard-coded cap of 40%")
                     }
                 )
+
+                // Applies to high temps too, and whether or not SMBs are enabled, so it is never hidden.
+                SettingInputSection(
+                    decimalValue: $decimalPlaceholder,
+                    booleanValue: $state.iobLimitsInsulinReq,
+                    shouldDisplayHint: $shouldDisplayHint,
+                    selectedVerboseHint: Binding(
+                        get: { selectedVerboseHint },
+                        set: {
+                            selectedVerboseHint = $0.map { AnyView($0) }
+                            hintLabel = String(localized: "IOB Limits SMBs and High Temps")
+                        }
+                    ),
+                    units: state.units,
+                    type: .boolean,
+                    label: String(localized: "IOB Limits SMBs and High Temps"),
+                    miniHint: String(
+                        localized: "Add insulin, by SMB or high temp, only up to what glucose minus IOB × ISF still needs to reach target."
+                    ),
+                    verboseHint:
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Default: OFF").bold()
+                        Text(
+                            "When enabled, the insulin already on board limits how much insulin Trio may add, both as SMBs and as high temp basals. Trio takes current glucose minus IOB × ISF, which is where glucose would end up from the insulin on board alone, and adds at most the insulin needed to bring that number down to target, even when a rising forecast asks for more. If the insulin on board already covers the way to target, Trio gives no SMB and does not raise the basal rate; a temp basal that is already running slightly above basal may take a few minutes to end. Carbs on board and the rate of rise are left out of this limit on purpose, so glucose may run somewhat higher during rises. It never makes Trio add more insulin than it otherwise would, it does not change how Trio lowers or stops insulin when glucose is falling or low, and it applies whether SMBs are enabled or not."
+                        )
+                    },
+                    headerText: String(localized: "Insulin On Board Limit")
+                )
             }
             .listSectionSpacing(sectionSpacing)
             .sheet(isPresented: $shouldDisplayHint) {

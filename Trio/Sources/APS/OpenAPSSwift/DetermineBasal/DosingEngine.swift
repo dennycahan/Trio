@@ -695,6 +695,94 @@ enum DosingEngine {
         return (insulinRequired, newDetermination)
     }
 
+    /// Insulin required, as `calculateInsulinRequired` above returns it, together with the stock value it came from.
+    struct InsulinRequirement {
+        /// What the SMB size, the high temp rate and `insulinReq` use.
+        let insulinRequired: Decimal
+        /// The stock oref value, after the max_iob clamp and before the IOB limit. Equal to
+        /// `insulinRequired` whenever the IOB limit is off or does not bind.
+        let stockInsulinRequired: Decimal
+        let determination: Determination
+    }
+
+    /// Stock `calculateInsulinRequired`, then, when `iobLimitsInsulinReq` is on, the Trio-only IOB limit:
+    ///
+    ///     insulinRequired = min(stock, max(0, (naiveEventualGlucose − targetGlucose) / adjustedSensitivity))
+    ///
+    /// What is already on board (glucose − IOB × ISF) caps how much may be added; the rate-of-change
+    /// forecast can still ask for less but never for more. Deviation, COB and UAM are deliberately left out.
+    /// A negative or zero stock value is never changed. With the limit off the result is the stock one.
+    static func calculateInsulinRequired(
+        minForecastGlucose: Decimal,
+        eventualGlucose: Decimal,
+        targetGlucose: Decimal,
+        adjustedSensitivity: Decimal,
+        maxIob: Decimal,
+        currentIob: Decimal,
+        naiveEventualGlucose: Decimal,
+        iobLimitsInsulinReq: Bool,
+        determination: Determination
+    ) -> InsulinRequirement {
+        let (stockInsulinRequired, stockDetermination) = calculateInsulinRequired(
+            minForecastGlucose: minForecastGlucose,
+            eventualGlucose: eventualGlucose,
+            targetGlucose: targetGlucose,
+            adjustedSensitivity: adjustedSensitivity,
+            maxIob: maxIob,
+            currentIob: currentIob,
+            determination: determination
+        )
+
+        guard iobLimitsInsulinReq else {
+            return InsulinRequirement(
+                insulinRequired: stockInsulinRequired,
+                stockInsulinRequired: stockInsulinRequired,
+                determination: stockDetermination
+            )
+        }
+
+        let limitedInsulinRequired = min(
+            stockInsulinRequired,
+            insulinRoomLeftByIob(
+                naiveEventualGlucose: naiveEventualGlucose,
+                targetGlucose: targetGlucose,
+                adjustedSensitivity: adjustedSensitivity
+            )
+        )
+        guard limitedInsulinRequired < stockInsulinRequired else {
+            return InsulinRequirement(
+                insulinRequired: stockInsulinRequired,
+                stockInsulinRequired: stockInsulinRequired,
+                determination: stockDetermination
+            )
+        }
+
+        var newDetermination = stockDetermination
+        // Follows "max_iob X, " after the "; " that ends the tag cloud. It must never contain "; " itself.
+        // Like stock's max_iob text it is always in the full reason (and Nightscout), but the home screen
+        // shows only the last "; " segment: when the SMB path then appends "; maxBolus" or
+        // "; setting … low temp", the marker sits in a middle segment shown nowhere in the app.
+        newDetermination.reason += "IOB limit \(stockInsulinRequired)→\(limitedInsulinRequired), "
+        newDetermination.insulinReq = limitedInsulinRequired
+        return InsulinRequirement(
+            insulinRequired: limitedInsulinRequired,
+            stockInsulinRequired: stockInsulinRequired,
+            determination: newDetermination
+        )
+    }
+
+    /// Insulin it takes to bring `naiveEventualGlucose` (glucose − IOB × ISF) down to target, never below 0.
+    /// Floored to 2 decimals, like stock insulinReq's precision, so it can never exceed the exact value.
+    static func insulinRoomLeftByIob(
+        naiveEventualGlucose: Decimal,
+        targetGlucose: Decimal,
+        adjustedSensitivity: Decimal
+    ) -> Decimal {
+        let room = ((naiveEventualGlucose - targetGlucose) / adjustedSensitivity).rounded(scale: 2, roundingMode: .down)
+        guard room.isFinite else { return 0 }
+        return max(0, room)
+    }
+
     /// Determines the maxBolus possible for a Super Micro Bolus (SMB)
     static func determineMaxBolus(
         currentBasal: Decimal,
@@ -731,11 +819,19 @@ enum DosingEngine {
 
     /// Determines if a Super Micro Bolus (SMB) should be delivered and calculates its size and associated temp basal.
     ///
+    /// `stockInsulinRequired` is the value before the IOB limit (nil means the same as `insulinRequired`).
+    /// Only the low temp decision uses it, so the IOB limit shrinks the microbolus but never trades
+    /// stock's SMB low temp for a high temp. A caller that passes a limited `insulinRequired` must pass the
+    /// stock value here: with nil, a limit whose microbolus floors to 0 drops stock's low temp and falls
+    /// through to a high temp of basal + 2 × the limited value, a higher rate than stock would run.
+    /// The nil default keeps stock callers (and their tests) unchanged.
+    ///
     /// - Returns: A tuple containing:
     ///   - `shouldSetTempBasal`: `true` if an SMB (or associated low temp) was enacted and the process should exit.
     ///   - `determination`: The (potentially modified) determination object containing the decision.
     static func determineSMBDelivery(
         insulinRequired: Decimal,
+        stockInsulinRequired: Decimal? = nil,
         microBolusAllowed: Bool,
         smbIsEnabled: Bool,
         currentGlucose: Decimal,
@@ -786,8 +882,12 @@ enum DosingEngine {
         var durationRequired = (60 * worstCaseInsulinRequired / currentBasal * trioCustomOrefVariables.overrideFactor())
             .jsRounded()
 
-        // if insulinRequired > 0 but not enough for a microBolus, don't set an SMB zero temp
-        if insulinRequired > 0, microBolus < profile.bolusIncrement {
+        // if insulinRequired > 0 but not enough for a microBolus, don't set an SMB zero temp.
+        // Decided on the stock values: when the IOB limit shrinks a stock microbolus to nothing, the stock
+        // low temp stays rather than falling through to a high temp. Identical to stock when the limit did not bind.
+        let lowTempInsulinRequired = stockInsulinRequired ?? insulinRequired
+        let lowTempMicroBolus = (min(lowTempInsulinRequired * smbDeliveryRatio, maxBolus) * roundSmbTo).floor() / roundSmbTo
+        if lowTempInsulinRequired > 0, lowTempMicroBolus < profile.bolusIncrement {
             durationRequired = 0
         }
 

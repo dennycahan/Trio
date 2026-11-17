@@ -137,7 +137,8 @@ enum SettingItems {
                 "Enable UAM",
                 "Max SMB Basal Minutes",
                 "Max UAM SMB Basal Minutes",
-                "Max Allowed Glucose Rise for SMB"
+                "Max Allowed Glucose Rise for SMB",
+                "IOB Limits SMBs and High Temps"
             ],
             scrollTargetLabels: [
                 "Enable SMB With Temporary Target": "Enable SMB With Temptarget",

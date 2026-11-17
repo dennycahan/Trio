@@ -510,21 +510,25 @@ enum DeterminationGenerator {
 
         // MARK: - Aggressive dosing logic (SMB, High Temps)
 
-        // Calculate Insulin Required
-        let (insulinRequired, insulinReqDetermination) = DosingEngine.calculateInsulinRequired(
+        // Calculate Insulin Required (stock, then the opt-in IOB limit)
+        let insulinRequirement = DosingEngine.calculateInsulinRequired(
             minForecastGlucose: forecastResult.minForecastedGlucose,
             eventualGlucose: forecastResult.eventualGlucose,
             targetGlucose: adjustedGlucoseTargets.targetGlucose,
             adjustedSensitivity: adjustedSensitivity,
             maxIob: profile.maxIob,
             currentIob: currentIob,
+            naiveEventualGlucose: naiveEventualGlucose,
+            iobLimitsInsulinReq: preferences.iobLimitsInsulinReq,
             determination: determination
         )
-        determination = insulinReqDetermination
+        let insulinRequired = insulinRequirement.insulinRequired
+        determination = insulinRequirement.determination
 
         // SMB Delivery
         let (shouldSetTempBasalForSMB, smbDetermination) = try DosingEngine.determineSMBDelivery(
             insulinRequired: insulinRequired,
+            stockInsulinRequired: insulinRequirement.stockInsulinRequired,
             microBolusAllowed: microBolusAllowed,
             smbIsEnabled: smbIsEnabled,
             currentGlucose: currentGlucose,

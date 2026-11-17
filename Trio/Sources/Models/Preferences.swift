@@ -53,6 +53,9 @@ struct Preferences: JSON, Equatable {
     var enableSMB_high_bg_target: Decimal = 110
     var threshold_setting: Decimal = 60
     var updateInterval: Decimal = 20
+    /// Trio-only: insulin on board limits SMBs and high temps to what glucose − IOB × ISF still needs to reach
+    /// target. Read straight from preferences by the determination, so profile.json is unchanged.
+    var iobLimitsInsulinReq: Bool = false
 }
 
 extension Preferences {
@@ -108,6 +111,7 @@ extension Preferences {
         case enableSMB_high_bg_target
         case threshold_setting
         case updateInterval
+        case iobLimitsInsulinReq
     }
 }
 
@@ -326,6 +330,10 @@ extension Preferences: Decodable {
 
         if let updateInterval = try? container.decode(Decimal.self, forKey: .updateInterval) {
             preferences.updateInterval = updateInterval
+        }
+
+        if let iobLimitsInsulinReq = try? container.decode(Bool.self, forKey: .iobLimitsInsulinReq) {
+            preferences.iobLimitsInsulinReq = iobLimitsInsulinReq
         }
 
         self = preferences
