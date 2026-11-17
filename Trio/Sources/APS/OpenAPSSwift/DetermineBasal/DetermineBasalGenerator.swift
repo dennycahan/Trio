@@ -510,7 +510,7 @@ enum DeterminationGenerator {
 
         // MARK: - Aggressive dosing logic (SMB, High Temps)
 
-        // Calculate Insulin Required (stock, then the opt-in IOB limit)
+        // Calculate Insulin Required (stock, then the opt-in IOB limit, optionally counting carbs on board)
         let insulinRequirement = DosingEngine.calculateInsulinRequired(
             minForecastGlucose: forecastResult.minForecastedGlucose,
             eventualGlucose: forecastResult.eventualGlucose,
@@ -520,6 +520,10 @@ enum DeterminationGenerator {
             currentIob: currentIob,
             naiveEventualGlucose: naiveEventualGlucose,
             iobLimitsInsulinReq: preferences.iobLimitsInsulinReq,
+            iobLimitCountsCarbs: preferences.iobLimitCountsCarbs,
+            // the COB and adjusted carb ratio the COB forecast runs on
+            carbsOnBoard: mealData.mealCOB,
+            carbRatio: forecastResult.adjustedCarbRatio,
             determination: determination
         )
         let insulinRequired = insulinRequirement.insulinRequired

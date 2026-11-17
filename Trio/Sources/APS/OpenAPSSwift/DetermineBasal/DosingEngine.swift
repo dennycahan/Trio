@@ -710,8 +710,10 @@ enum DosingEngine {
     ///     insulinRequired = min(stock, max(0, (naiveEventualGlucose − targetGlucose) / adjustedSensitivity))
     ///
     /// What is already on board (glucose − IOB × ISF) caps how much may be added; the rate-of-change
-    /// forecast can still ask for less but never for more. Deviation, COB and UAM are deliberately left out.
-    /// A negative or zero stock value is never changed. With the limit off the result is the stock one.
+    /// forecast can still ask for less but never for more. Deviation and UAM are deliberately left out.
+    /// With `iobLimitCountsCarbs` also on, carbs on board widen the room by the insulin they still need,
+    /// `carbsOnBoard / carbRatio` (the COB and adjusted carb ratio the COB forecast runs on); on its own it
+    /// does nothing. A negative or zero stock value is never changed. With the limit off the result is stock.
     static func calculateInsulinRequired(
         minForecastGlucose: Decimal,
         eventualGlucose: Decimal,
@@ -721,6 +723,9 @@ enum DosingEngine {
         currentIob: Decimal,
         naiveEventualGlucose: Decimal,
         iobLimitsInsulinReq: Bool,
+        iobLimitCountsCarbs: Bool = false,
+        carbsOnBoard: Decimal = 0,
+        carbRatio: Decimal = 0,
         determination: Determination
     ) -> InsulinRequirement {
         let (stockInsulinRequired, stockDetermination) = calculateInsulinRequired(
@@ -741,12 +746,14 @@ enum DosingEngine {
             )
         }
 
+        let carbInsulin = iobLimitCountsCarbs ? insulinForCarbsOnBoard(carbsOnBoard: carbsOnBoard, carbRatio: carbRatio) : 0
         let limitedInsulinRequired = min(
             stockInsulinRequired,
             insulinRoomLeftByIob(
                 naiveEventualGlucose: naiveEventualGlucose,
                 targetGlucose: targetGlucose,
-                adjustedSensitivity: adjustedSensitivity
+                adjustedSensitivity: adjustedSensitivity,
+                carbInsulin: carbInsulin
             )
         )
         guard limitedInsulinRequired < stockInsulinRequired else {
@@ -762,7 +769,13 @@ enum DosingEngine {
         // Like stock's max_iob text it is always in the full reason (and Nightscout), but the home screen
         // shows only the last "; " segment: when the SMB path then appends "; maxBolus" or
         // "; setting … low temp", the marker sits in a middle segment shown nowhere in the app.
-        newDetermination.reason += "IOB limit \(stockInsulinRequired)→\(limitedInsulinRequired), "
+        // The marker only appears when the limit binds (limited below stock). Its form is "IOB+carbs limit"
+        // whenever carbs on board were counted, i.e. the sub-option is on and the carb term is positive, even when
+        // the limited value is still 0 ("IOB+carbs limit 2.4→0, "); otherwise "IOB limit". When carbs lift the
+        // room to stock or above, nothing binds and there is no marker at all. Never "COB" or "CR": LoopFollow
+        // reads "COB: n" and "CR: n" out of the reason.
+        let label = carbInsulin > 0 ? "IOB+carbs limit" : "IOB limit"
+        newDetermination.reason += "\(label) \(stockInsulinRequired)→\(limitedInsulinRequired), "
         newDetermination.insulinReq = limitedInsulinRequired
         return InsulinRequirement(
             insulinRequired: limitedInsulinRequired,
@@ -771,16 +784,29 @@ enum DosingEngine {
         )
     }
 
-    /// Insulin it takes to bring `naiveEventualGlucose` (glucose − IOB × ISF) down to target, never below 0.
-    /// Floored to 2 decimals, like stock insulinReq's precision, so it can never exceed the exact value.
+    /// Insulin it takes to bring `naiveEventualGlucose` (glucose − IOB × ISF) down to target, plus `carbInsulin`,
+    /// never below 0. The total is floored to 2 decimals, like stock insulinReq's precision, so it can never
+    /// exceed the exact value.
     static func insulinRoomLeftByIob(
         naiveEventualGlucose: Decimal,
         targetGlucose: Decimal,
-        adjustedSensitivity: Decimal
+        adjustedSensitivity: Decimal,
+        carbInsulin: Decimal = 0
     ) -> Decimal {
-        let room = ((naiveEventualGlucose - targetGlucose) / adjustedSensitivity).rounded(scale: 2, roundingMode: .down)
+        let room = ((naiveEventualGlucose - targetGlucose) / adjustedSensitivity + carbInsulin)
+            .rounded(scale: 2, roundingMode: .down)
         guard room.isFinite else { return 0 }
         return max(0, room)
+    }
+
+    /// Insulin the carbs on board still need, `carbsOnBoard / carbRatio`. Anything that is not a positive,
+    /// finite amount (no COB, a carb ratio of 0, a negative or NaN input) counts as 0, so the carb term can
+    /// only ever widen the room.
+    static func insulinForCarbsOnBoard(carbsOnBoard: Decimal, carbRatio: Decimal) -> Decimal {
+        guard carbsOnBoard > 0, carbRatio > 0 else { return 0 }
+        let units = carbsOnBoard / carbRatio
+        guard units.isFinite, units > 0 else { return 0 }
+        return units
     }
 
     /// Determines the maxBolus possible for a Super Micro Bolus (SMB)

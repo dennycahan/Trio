@@ -1457,6 +1457,242 @@ private let noCarbs = ComputedCarbs(
     }
 }
 
+@Suite("IOB limit: counting carbs on board") struct IobLimitCountsCarbsTests {
+    /// target 90 and ISF 25 throughout; `stockGlucose` is min(minPredBG, eventualBG)
+    private func requirement(
+        stockGlucose: Decimal,
+        naiveEventualGlucose: Decimal,
+        carbsOnBoard: Decimal,
+        carbRatio: Decimal,
+        maxIob: Decimal = 10,
+        currentIob: Decimal,
+        limit: Bool = true,
+        countCarbs: Bool = true
+    ) -> DosingEngine.InsulinRequirement {
+        DosingEngine.calculateInsulinRequired(
+            minForecastGlucose: stockGlucose,
+            eventualGlucose: stockGlucose,
+            targetGlucose: 90,
+            adjustedSensitivity: 25,
+            maxIob: maxIob,
+            currentIob: currentIob,
+            naiveEventualGlucose: naiveEventualGlucose,
+            iobLimitsInsulinReq: limit,
+            iobLimitCountsCarbs: countCarbs,
+            carbsOnBoard: carbsOnBoard,
+            carbRatio: carbRatio,
+            determination: blankDetermination()
+        )
+    }
+
+    @Test(
+        "SPEC-2 worked example: glucose 110, IOB 3.8, ISF 25, COB 45 g, carb ratio 9.5: room 0 ignoring carbs, 1.73 counting them"
+    ) func workedExample() {
+        // naive 110 - 3.8 x 25 = 15; ignoring carbs (15 - 90) / 25 = -3, so the room is 0
+        let naive = (Decimal(110) - dec("3.8") * 25).jsRounded()
+        #expect(naive == 15)
+        #expect(DosingEngine.insulinRoomLeftByIob(naiveEventualGlucose: 15, targetGlucose: 90, adjustedSensitivity: 25) == 0)
+        // counting them: -3 + 45 / 9.5 = -3 + 4.7368... = 1.7368..., floored to 1.73
+        // (SPEC-2 writes 1.74 because it rounds 4.74 first)
+        let carbInsulin = DosingEngine.insulinForCarbsOnBoard(carbsOnBoard: 45, carbRatio: dec("9.5"))
+        #expect(carbInsulin.rounded(scale: 6) == dec("4.736842"))
+        #expect(
+            DosingEngine.insulinRoomLeftByIob(
+                naiveEventualGlucose: 15,
+                targetGlucose: 90,
+                adjustedSensitivity: 25,
+                carbInsulin: carbInsulin
+            ) == dec("1.73")
+        )
+
+        // stock (150 - 90) / 25 = 2.4
+        let ignored = requirement(
+            stockGlucose: 150,
+            naiveEventualGlucose: 15,
+            carbsOnBoard: 45,
+            carbRatio: dec("9.5"),
+            currentIob: dec("3.8"),
+            countCarbs: false
+        )
+        #expect(ignored.insulinRequired == 0)
+        #expect(ignored.determination.reason == "IOB limit 2.4→0, ")
+        let counted = requirement(
+            stockGlucose: 150,
+            naiveEventualGlucose: 15,
+            carbsOnBoard: 45,
+            carbRatio: dec("9.5"),
+            currentIob: dec("3.8")
+        )
+        #expect(counted.stockInsulinRequired == dec("2.4"))
+        #expect(counted.insulinRequired == dec("1.73"))
+        #expect(counted.determination.insulinReq == dec("1.73"))
+        #expect(counted.determination.reason == "IOB+carbs limit 2.4→1.73, ")
+
+        // stock (120 - 90) / 25 = 1.2 is under the room with carbs, so it stands; without carbs it is limited to 0
+        let below = requirement(
+            stockGlucose: 120,
+            naiveEventualGlucose: 15,
+            carbsOnBoard: 45,
+            carbRatio: dec("9.5"),
+            currentIob: dec("3.8")
+        )
+        #expect(below.insulinRequired == dec("1.2"))
+        #expect(below.determination.reason == "")
+        let belowIgnored = requirement(
+            stockGlucose: 120,
+            naiveEventualGlucose: 15,
+            carbsOnBoard: 45,
+            carbRatio: dec("9.5"),
+            currentIob: dec("3.8"),
+            countCarbs: false
+        )
+        #expect(belowIgnored.insulinRequired == 0)
+        #expect(belowIgnored.determination.reason == "IOB limit 1.2→0, ")
+    }
+
+    @Test("Carb term guards: only a positive, finite COB / carb ratio counts, and it never lowers the room") func guards() {
+        #expect(DosingEngine.insulinForCarbsOnBoard(carbsOnBoard: 45, carbRatio: 10) == dec("4.5"))
+        let invalid: [(cob: Decimal, ratio: Decimal)] = [
+            (0, 10), (45, 0), (-5, 10), (45, -10), (Decimal.nan, 10), (45, Decimal.nan), (0, 0), (-5, -10)
+        ]
+        for input in invalid {
+            #expect(DosingEngine.insulinForCarbsOnBoard(carbsOnBoard: input.cob, carbRatio: input.ratio) == 0, "\(input)")
+            // through the limit: the same as ignoring carbs, marker included. Naive 113: room 0.92; stock 2.4
+            let counted = requirement(
+                stockGlucose: 150,
+                naiveEventualGlucose: 113,
+                carbsOnBoard: input.cob,
+                carbRatio: input.ratio,
+                currentIob: dec("3.3")
+            )
+            #expect(counted.insulinRequired == dec("0.92"), "\(input)")
+            #expect(counted.determination.reason == "IOB limit 2.4→0.92, ", "\(input)")
+        }
+    }
+
+    @Test("Counting carbs with the IOB limit off is stock: value, insulinReq and reason") func carbsWithoutLimitIsStock() {
+        let stockGlucoses: [Decimal] = [85, 150, 260]
+        let naiveGlucoses: [Decimal] = [15, 113, 300]
+        let carbs: [Decimal] = [0, 45, 120]
+        let iobCases: [(maxIob: Decimal, iob: Decimal)] = [(10, 0), (3, 1.2)]
+        for stockGlucose in stockGlucoses {
+            for naiveGlucose in naiveGlucoses {
+                for cob in carbs {
+                    for iobCase in iobCases {
+                        let label = "stock bg \(stockGlucose) naive \(naiveGlucose) cob \(cob) max_iob \(iobCase.maxIob)"
+                        let (stockValue, stockDetermination) = DosingEngine.calculateInsulinRequired(
+                            minForecastGlucose: stockGlucose,
+                            eventualGlucose: stockGlucose,
+                            targetGlucose: 90,
+                            adjustedSensitivity: 25,
+                            maxIob: iobCase.maxIob,
+                            currentIob: iobCase.iob,
+                            determination: blankDetermination()
+                        )
+                        let result = requirement(
+                            stockGlucose: stockGlucose,
+                            naiveEventualGlucose: naiveGlucose,
+                            carbsOnBoard: cob,
+                            carbRatio: 10,
+                            maxIob: iobCase.maxIob,
+                            currentIob: iobCase.iob,
+                            limit: false
+                        )
+                        #expect(result.insulinRequired == stockValue, "\(label)")
+                        #expect(result.stockInsulinRequired == stockValue, "\(label)")
+                        #expect(result.determination.insulinReq == stockDetermination.insulinReq, "\(label)")
+                        #expect(result.determination.reason == stockDetermination.reason, "\(label)")
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("max_iob clamps first, then the room with carbs; marker follows max_iob") func maxIobWithCarbs() {
+        // stock (200 - 90) / 25 = 4.4, clamped to max_iob 3 - IOB 1.2 = 1.8
+        // naive 80: (80 - 90) / 25 = -0.4; COB 20 / CR 10 = 2, room 1.6
+        let counted = requirement(
+            stockGlucose: 200,
+            naiveEventualGlucose: 80,
+            carbsOnBoard: 20,
+            carbRatio: 10,
+            maxIob: 3,
+            currentIob: dec("1.2")
+        )
+        #expect(counted.insulinRequired == dec("1.6"))
+        #expect(counted.determination.reason == "max_iob 3, IOB+carbs limit 1.8→1.6, ")
+        let ignored = requirement(
+            stockGlucose: 200,
+            naiveEventualGlucose: 80,
+            carbsOnBoard: 20,
+            carbRatio: 10,
+            maxIob: 3,
+            currentIob: dec("1.2"),
+            countCarbs: false
+        )
+        #expect(ignored.insulinRequired == 0)
+        #expect(ignored.determination.reason == "max_iob 3, IOB limit 1.8→0, ")
+        // COB 40: room -0.4 + 4 = 3.6, above the clamped 1.8, so nothing binds
+        let wide = requirement(
+            stockGlucose: 200,
+            naiveEventualGlucose: 80,
+            carbsOnBoard: 40,
+            carbRatio: 10,
+            maxIob: 3,
+            currentIob: dec("1.2")
+        )
+        #expect(wide.insulinRequired == dec("1.8"))
+        #expect(wide.determination.reason == "max_iob 3, ")
+    }
+
+    @Test("Carbs ignored <= carbs counted <= stock, with every room worked out by hand") func ordering() {
+        // room at target 90, ISF 25, carb ratio 10: (naive - 90) / 25 + COB / 10, floored to 2 decimals, at least 0
+        let rows: [(naive: Decimal, cob: Decimal, ignored: String, counted: String)] = [
+            (40, 0, "0", "0"), (40, 15, "0", "0"), (40, 45, "0", "2.5"),
+            (90, 0, "0", "0"), (90, 15, "0", "1.5"), (90, 45, "0", "4.5"),
+            (113, 0, "0.92", "0.92"), (113, 15, "0.92", "2.42"), (113, 45, "0.92", "5.42"),
+            (160, 0, "2.8", "2.8"), (160, 15, "2.8", "4.3"), (160, 45, "2.8", "7.3")
+        ]
+        // stock 0.2, 2.4 and 6.8
+        let stocks: [(glucose: Decimal, value: String)] = [(95, "0.2"), (150, "2.4"), (260, "6.8")]
+        var bound = 0
+        for row in rows {
+            for stock in stocks {
+                let label = "naive \(row.naive) cob \(row.cob) stock \(stock.value)"
+                let ignored = requirement(
+                    stockGlucose: stock.glucose,
+                    naiveEventualGlucose: row.naive,
+                    carbsOnBoard: row.cob,
+                    carbRatio: 10,
+                    currentIob: 1,
+                    countCarbs: false
+                )
+                let counted = requirement(
+                    stockGlucose: stock.glucose,
+                    naiveEventualGlucose: row.naive,
+                    carbsOnBoard: row.cob,
+                    carbRatio: 10,
+                    currentIob: 1
+                )
+                let expectedIgnored = min(dec(stock.value), dec(row.ignored))
+                let expectedCounted = min(dec(stock.value), dec(row.counted))
+                #expect(ignored.insulinRequired == expectedIgnored, "\(label)")
+                #expect(counted.insulinRequired == expectedCounted, "\(label)")
+                #expect(ignored.insulinRequired <= counted.insulinRequired, "\(label)")
+                #expect(counted.insulinRequired <= dec(stock.value), "\(label)")
+                if expectedCounted < dec(stock.value) {
+                    bound += 1
+                    let form = row.cob > 0 ? "IOB+carbs limit" : "IOB limit"
+                    #expect(counted.determination.reason == "\(form) \(stock.value)→\(expectedCounted), ", "\(label)")
+                } else {
+                    #expect(counted.determination.reason == "", "\(label)")
+                }
+            }
+        }
+        #expect(bound > 10)
+    }
+}
+
 @Suite("IOB limit: SMB low temp follows the stock decision") struct IobLimitSmbLowTempTests {
     private func smbProfile(increment: Decimal = 0.1, sens: Decimal = 50, target: Decimal = 100) -> Profile {
         var profile = Profile()
@@ -1684,6 +1920,11 @@ enum IobLimitPipeline {
         var overridePercentage: Decimal = 100
         var autosensRatio: Decimal = 1
         var skipNeutralTemps = false
+        /// grams entered `carbsMinutesAgo` ago
+        var carbs: Decimal = 0
+        var carbsMinutesAgo = 0
+        /// also run with "IOB Limit Counts Carbs on Board": first off and second on, and both on
+        var countCarbs = false
         /// replaces the generated description, e.g. with a parity scenario name
         var name: String?
 
@@ -1694,7 +1935,7 @@ enum IobLimitPipeline {
             return "bg \(glucose) delta \(delta) last \(lastDelta.map { "\($0)" } ?? "-") " +
                 "bolus \(bolus)@-\(bolusMinutesAgo)m zeroTemp \(zeroTempHours)h temp \(temp) " +
                 "smb \(smb) tt \(tempTarget.map { "\($0)" } ?? "-") override \(override) autosens \(autosensRatio) " +
-                "skipNeutral \(skipNeutralTemps)"
+                "skipNeutral \(skipNeutralTemps) carbs \(carbs)@-\(carbsMinutesAgo)m"
         }
     }
 
@@ -1703,6 +1944,8 @@ enum IobLimitPipeline {
         let currentTemp: TempBasal
         let profile: Profile
         let orefVariables: TrioCustomOrefVariables
+        /// unrounded COB the determination ran on (the reason and `cob` show it rounded)
+        var mealCOB: Decimal = 0
 
         var units: Decimal { determination.units ?? 0 }
 
@@ -1741,8 +1984,14 @@ enum IobLimitPipeline {
 
     struct Pair {
         let testCase: Case
+        /// both preferences off: stock
         let off: Outcome
+        /// IOB limit on, carbs not counted
         let on: Outcome
+        /// IOB limit off, counting carbs on: must be stock
+        var carbsOnly: Outcome?
+        /// both on
+        var onCarbs: Outcome?
     }
 
     /// IOB and meal results by the inputs they are computed from. Neither generator reads the target, SMB
@@ -1844,7 +2093,16 @@ enum IobLimitPipeline {
             iob = try IobGenerator.generate(history: history, profile: profile, clock: clock, autosens: autosens)
             cache?.iob[iobKey] = iob
         }
-        let mealKey = historyKey + "|" + traceKey
+        let carbHistory = testCase.carbs > 0 ?
+            [
+                CarbsEntry
+                    .forTest(
+                        createdAt: clock.addingTimeInterval(TimeInterval(-testCase.carbsMinutesAgo * 60)),
+                        carbs: testCase.carbs
+                    )
+            ] :
+            []
+        let mealKey = historyKey + "|" + traceKey + "|\(testCase.carbs)@\(testCase.carbsMinutesAgo)"
         let meal: ComputedCarbs
         if let cached = cache?.meal[mealKey] {
             meal = cached
@@ -1854,7 +2112,7 @@ enum IobLimitPipeline {
                 profile: profile,
                 basalProfile: basalProfile,
                 clock: clock,
-                carbHistory: [],
+                carbHistory: carbHistory,
                 glucoseHistory: glucose
             ) else {
                 throw ParityError("meal generation returned nil for \(testCase)")
@@ -1889,9 +2147,10 @@ enum IobLimitPipeline {
             )
         }
 
-        func outcome(limit: Bool) throws -> Outcome {
+        func outcome(limit: Bool, countCarbs: Bool = false) throws -> Outcome {
             var runPreferences = preferences
             runPreferences.iobLimitsInsulinReq = limit
+            runPreferences.iobLimitCountsCarbs = countCarbs
             guard let determination = try DeterminationGenerator.generate(
                 profile: profile,
                 preferences: runPreferences,
@@ -1907,19 +2166,40 @@ enum IobLimitPipeline {
             ) else {
                 throw ParityError("no determination for \(testCase)")
             }
-            return Outcome(determination: determination, currentTemp: currentTemp, profile: profile, orefVariables: orefVariables)
+            return Outcome(
+                determination: determination,
+                currentTemp: currentTemp,
+                profile: profile,
+                orefVariables: orefVariables,
+                mealCOB: meal.mealCOB
+            )
         }
 
         let off = try outcome(limit: false)
         let on = try outcome(limit: true)
-        return Pair(testCase: testCase, off: off, on: on)
+        var pair = Pair(testCase: testCase, off: off, on: on)
+        if testCase.countCarbs {
+            pair.carbsOnly = try outcome(limit: false, countCarbs: true)
+            pair.onCarbs = try outcome(limit: true, countCarbs: true)
+        }
+        return pair
     }
 
     /// The limit recomputed from the determination's own inputs: current glucose, IOB, the adjusted target the
     /// determination reports, and ISF adjusted for override and autosens. It mirrors DosingEngine's formula and
     /// rounding, so it checks plumbing only (that the generator hands the right naive, target and ISF to the
     /// limit), not the formula; the formula is pinned by the hand-worked literals in the other tests.
-    static func expectedRoom(_ outcome: Outcome, clock: Date) -> Decimal? {
+    static func expectedRoom(_ outcome: Outcome, clock: Date, countCarbs: Bool = false) -> Decimal? {
+        expectedLimit(outcome, clock: clock, countCarbs: countCarbs)?.room
+    }
+
+    /// The room, and the carb insulin in it: COB / carb ratio, with the carb ratio adjusted for an override
+    /// the way the COB forecast adjusts it.
+    static func expectedLimit(
+        _ outcome: Outcome,
+        clock: Date,
+        countCarbs: Bool
+    ) -> (room: Decimal, carbInsulin: Decimal)? {
         let determination = outcome.determination
         guard let glucose = determination.bg, let iob = determination.iob, let target = determination.current_target,
               let ratio = determination.sensitivityRatio, let profileISF = outcome.profile.sens
@@ -1931,7 +2211,15 @@ enum IobLimitPipeline {
         )
         let profileSens = outcome.profile.profileSensitivity(at: clock, trioCustomOrefVaribales: outcome.orefVariables)
         let naive = iob > 0 ? (glucose - iob * sens).jsRounded() : (glucose - iob * min(profileSens, sens)).jsRounded()
-        return max(0, ((naive - target) / sens).rounded(scale: 2, roundingMode: .down))
+        var carbInsulin: Decimal = 0
+        if countCarbs {
+            let variables = outcome.orefVariables
+            let profileCarbRatio = outcome.profile.carbRatio ?? outcome.profile.carbRatioFor(time: clock)
+            let carbRatio = variables.useOverride && (variables.cr || variables.isfAndCr) ?
+                profileCarbRatio / (variables.overridePercentage / 100) : profileCarbRatio
+            if outcome.mealCOB > 0, carbRatio > 0 { carbInsulin = outcome.mealCOB / carbRatio }
+        }
+        return (max(0, ((naive - target) / sens + carbInsulin).rounded(scale: 2, roundingMode: .down)), carbInsulin)
     }
 
     struct Stats: CustomStringConvertible {
@@ -1945,6 +2233,13 @@ enum IobLimitPipeline {
         var stockSmbBelowIncrementToHighTempPath = 0
         var onKeepsRunningTempOffSetsNew = 0
         var onMoreInsulinOver30MinIfLoopStopped = 0
+        var carbsCases = 0
+        var carbsBound = 0
+        /// counting carbs gave a different (larger) insulinReq than ignoring them
+        var carbsChangedResult = 0
+        /// ... and different units or effective rate
+        var carbsChangedDosing = 0
+        var carbsMarker = 0
 
         var description: String {
             "cases \(cases), limit bound \(bound) (to 0: \(boundToZero)), units reduced \(unitsReduced), " +
@@ -1952,7 +2247,9 @@ enum IobLimitPipeline {
                 "with limit > 0 and no microbolus: \(smbLowTempKeptLimitPositive), " +
                 "stock SMB below increment then limit 0 (high temp path): \(stockSmbBelowIncrementToHighTempPath), " +
                 "on keeps running temp while off sets a new one: \(onKeepsRunningTempOffSetsNew), " +
-                "on more insulin over 30 min if the loop stopped: \(onMoreInsulinOver30MinIfLoopStopped)"
+                "on more insulin over 30 min if the loop stopped: \(onMoreInsulinOver30MinIfLoopStopped); " +
+                "counting carbs: cases \(carbsCases), bound \(carbsBound), changed insulinReq \(carbsChangedResult), " +
+                "changed units or rate \(carbsChangedDosing), IOB+carbs marker \(carbsMarker)"
         }
     }
 
@@ -1971,6 +2268,7 @@ enum IobLimitPipeline {
         let on = pair.on.determination
         let label = pair.testCase.description
         stats.cases += 1
+        checkCountingCarbs(pair, clock: clock, stats: &stats, sourceLocation: sourceLocation)
 
         #expect(pair.on.units <= pair.off.units, "\(label)", sourceLocation: sourceLocation)
         #expect(pair.on.effectiveRate <= pair.off.effectiveRate, "\(label)", sourceLocation: sourceLocation)
@@ -2009,6 +2307,65 @@ enum IobLimitPipeline {
         if pair.on.insulinNext30Minutes > pair.off.insulinNext30Minutes {
             stats.onMoreInsulinOver30MinIfLoopStopped += 1
         }
+    }
+
+    /// The other two combinations. Counting carbs with the IOB limit off must be stock. With both on: carbs ignored <=
+    /// carbs counted <= stock in units, effective rate and insulinReq, insulinReq ==
+    /// min(stock, room with carbs) (plumbing, as `expectedRoom`), identical to stock when it does not bind, and
+    /// the marker says "IOB+carbs" exactly when the carb term was positive.
+    static func checkCountingCarbs(
+        _ pair: Pair,
+        clock: Date,
+        stats: inout Stats,
+        sourceLocation: SourceLocation
+    ) {
+        let off = pair.off.determination
+        let label = pair.testCase.description
+        if let carbsOnly = pair.carbsOnly?.determination {
+            #expect(carbsOnly.reason == off.reason, "\(label)", sourceLocation: sourceLocation)
+            #expect(carbsOnly.insulinReq == off.insulinReq, "\(label)", sourceLocation: sourceLocation)
+            #expect(carbsOnly.units == off.units, "\(label)", sourceLocation: sourceLocation)
+            #expect(carbsOnly.rate == off.rate, "\(label)", sourceLocation: sourceLocation)
+            #expect(carbsOnly.duration == off.duration, "\(label)", sourceLocation: sourceLocation)
+        }
+        guard let onCarbsOutcome = pair.onCarbs else { return }
+        let onCarbs = onCarbsOutcome.determination
+        stats.carbsCases += 1
+
+        // carbs ignored <= carbs counted <= stock, in what the pump does as well as in insulinReq
+        #expect(onCarbsOutcome.units <= pair.off.units, "\(label)", sourceLocation: sourceLocation)
+        #expect(onCarbsOutcome.effectiveRate <= pair.off.effectiveRate, "\(label)", sourceLocation: sourceLocation)
+        #expect(pair.on.units <= onCarbsOutcome.units, "\(label)", sourceLocation: sourceLocation)
+        #expect(pair.on.effectiveRate <= onCarbsOutcome.effectiveRate, "\(label)", sourceLocation: sourceLocation)
+        #expect((onCarbs.rate == nil) == (onCarbs.duration == nil), "\(label)", sourceLocation: sourceLocation)
+        if onCarbsOutcome.units != pair.on.units || onCarbsOutcome.effectiveRate != pair.on.effectiveRate {
+            stats.carbsChangedDosing += 1
+        }
+
+        guard let offReq = off.insulinReq, let onReq = pair.on.determination.insulinReq,
+              let onCarbsReq = onCarbs.insulinReq,
+              let expected = expectedLimit(onCarbsOutcome, clock: clock, countCarbs: true)
+        else {
+            #expect(onCarbs.insulinReq == off.insulinReq, "\(label)", sourceLocation: sourceLocation)
+            #expect(onCarbs.reason == off.reason, "\(label)", sourceLocation: sourceLocation)
+            return
+        }
+        #expect(onReq <= onCarbsReq, "\(label)", sourceLocation: sourceLocation)
+        #expect(onCarbsReq <= offReq, "\(label)", sourceLocation: sourceLocation)
+        #expect(onCarbsReq == min(offReq, expected.room), "\(label)", sourceLocation: sourceLocation)
+        if onCarbsReq > onReq { stats.carbsChangedResult += 1 }
+
+        guard onCarbsReq < offReq else {
+            #expect(onCarbs.reason == off.reason, "\(label)", sourceLocation: sourceLocation)
+            #expect(onCarbs.units == off.units, "\(label)", sourceLocation: sourceLocation)
+            #expect(onCarbs.rate == off.rate, "\(label)", sourceLocation: sourceLocation)
+            #expect(onCarbs.duration == off.duration, "\(label)", sourceLocation: sourceLocation)
+            return
+        }
+        stats.carbsBound += 1
+        let marker = (expected.carbInsulin > 0 ? "IOB+carbs limit " : "IOB limit ") + "\(offReq)→\(onCarbsReq), "
+        #expect(onCarbs.reason.contains(marker), "\(label)", sourceLocation: sourceLocation)
+        if expected.carbInsulin > 0 { stats.carbsMarker += 1 }
     }
 }
 
@@ -2159,11 +2516,18 @@ enum IobLimitPipeline {
     @Test(
         "Marker follows the stock text, has no \"; \", leaves the tag cloud alone; shown on home unless a \"; \" follows"
     ) func markerInProducedReasons() throws {
+        // what the mmol/L rewriters key on, plus the "COB" and "CR" LoopFollow reads with "COB: n" and "CR: n"
         let glucoseLabels = [
             "ISF:", "Target:", "Dev:", "BGI:", "minPredBG", "minGuardBG", "IOBpredBG", "COBpredBG", "UAMpredBG", "Eventual BG",
-            "% of BG", "<", ">"
+            "% of BG", "<", ">", "COB", "CR"
         ]
+        var carbsCase = Case(glucose: 150, delta: 6, bolus: dec("4.2"), bolusMinutesAgo: 45, smb: true)
+        carbsCase.carbs = 45
+        carbsCase.carbsMinutesAgo = 20
+        carbsCase.countCarbs = true
         let cases: [(testCase: Case, marker: String, after: String, inConclusion: Bool)] = [
+            // counting carbs: the "IOB+carbs" form; the SMB path appends "; maxBolus 0.5"
+            (carbsCase, "IOB+carbs limit 2.72→2.27, ", "Eventual BG 214 >= 90, ", false),
             // SMB off: the high temp path appends no "; ", so the home screen conclusion shows the marker
             (
                 Case(glucose: 160, delta: 6, bolus: 4, bolusMinutesAgo: 45, runningTemp: 2.5, smb: false),
@@ -2182,16 +2546,21 @@ enum IobLimitPipeline {
         ]
         for item in cases {
             let pair = try run(item.testCase)
-            let on = pair.on.determination
+            let on = (item.testCase.countCarbs ? pair.onCarbs : pair.on)?.determination ?? pair.on.determination
             let off = pair.off.determination
-            let start = try #require(on.reason.range(of: "IOB limit "), "\(item.testCase)")
+            let form = item.marker.hasPrefix("IOB+carbs") ? "IOB+carbs limit " : "IOB limit "
+            let start = try #require(on.reason.range(of: form), "\(item.testCase)")
             let end = try #require(on.reason.range(of: ", ", range: start.upperBound ..< on.reason.endIndex), "\(item.testCase)")
             let marker = String(on.reason[start.lowerBound ..< end.upperBound])
             let beforeMarker = String(on.reason[..<start.lowerBound])
 
             #expect(marker == item.marker)
             #expect(!marker.contains("; "))
-            #expect(on.reason.components(separatedBy: "IOB limit ").count == 2)
+            // exactly one marker, in exactly one form
+            #expect(on.reason.components(separatedBy: form).count == 2)
+            let markers = on.reason.components(separatedBy: "IOB limit ").count +
+                on.reason.components(separatedBy: "IOB+carbs limit ").count - 2
+            #expect(markers == 1)
             for label in glucoseLabels {
                 #expect(!marker.contains(label), "\(label)")
             }
@@ -2203,18 +2572,253 @@ enum IobLimitPipeline {
             #expect(on.reasonConclusion.contains(marker) == item.inConclusion)
         }
     }
+
+    @Test(
+        "SPEC-2 worked example in a whole determination: ignoring carbs limits to 0, counting them gives stock back"
+    ) func ownerExampleWholeDetermination() throws {
+        // glucose 110 rising 4/5 min, IOB 3.8, ISF 25, target 90, COB 45 g, carb ratio 9.5: naive 15
+        let off = try IobLimitOwnerExample.determination(delta: 4, limit: false, countCarbs: false)
+        let carbsOnly = try IobLimitOwnerExample.determination(delta: 4, limit: false, countCarbs: true)
+        let ignored = try IobLimitOwnerExample.determination(delta: 4, limit: true, countCarbs: false)
+        let counted = try IobLimitOwnerExample.determination(delta: 4, limit: true, countCarbs: true)
+
+        // stock: insulinReq 1.52 (minPredBG 128), 0.5 U microbolus with a 60-minute zero temp
+        #expect(off.insulinReq == dec("1.52"))
+        #expect(off.units == 0.5)
+        #expect(off.rate == 0)
+        #expect(off.duration == 60)
+        // counting carbs without the limit: stock
+        #expect(carbsOnly.reason == off.reason)
+        #expect(carbsOnly.insulinReq == off.insulinReq)
+        #expect(carbsOnly.units == off.units)
+        // carbs ignored: room (15 - 90) / 25 = -3, so 0; no microbolus, the same zero temp
+        #expect(ignored.insulinReq == 0)
+        #expect(ignored.units == nil)
+        #expect(ignored.rate == 0)
+        #expect(ignored.duration == 60)
+        #expect(ignored.reason.contains("Eventual BG 153 >= 90, IOB limit 1.52→0, "))
+        // carbs counted: room -3 + 45 / 9.5 = 1.73, above stock's 1.52, so stock stands unchanged
+        #expect(counted.insulinReq == dec("1.52"))
+        #expect(counted.units == 0.5)
+        #expect(counted.rate == 0)
+        #expect(counted.duration == 60)
+        #expect(counted.reason == off.reason)
+    }
+
+    @Test(
+        "Real carbs entered 5 minutes ago, fully on board: ignoring them limits to 0, counting them does not bind"
+    ) func carbsFullyOnBoard() throws {
+        var testCase = Case(glucose: 110, delta: 3, bolus: dec("4.2"), bolusMinutesAgo: 45, smb: true)
+        testCase.carbs = 45
+        testCase.carbsMinutesAgo = 5
+        testCase.countCarbs = true
+        let pair = try run(testCase)
+        let onCarbs = try #require(pair.onCarbs)
+        // COB 45 g, IOB 3.611: naive 110 - 3.611 x 25 = 19.7, rounded 20; ignoring carbs (20 - 90) / 25 = -2.8, so 0;
+        // counting them -2.8 + 45 / 10 = 1.7, above stock's 1.63
+        #expect(onCarbs.mealCOB == 45)
+        #expect(pair.off.determination.iob == dec("3.611"))
+        #expect(pair.off.determination.insulinReq == dec("1.63"))
+        #expect(pair.on.determination.insulinReq == 0)
+        #expect(pair.on.determination.units == nil)
+        #expect(onCarbs.determination.insulinReq == dec("1.63"))
+        #expect(onCarbs.determination.units == 0.5)
+        #expect(onCarbs.determination.reason == pair.off.determination.reason)
+        // the stock 60-minute zero temp in all three
+        for outcome in [pair.off, pair.on, onCarbs] {
+            #expect(outcome.determination.rate == 0)
+            #expect(outcome.determination.duration == 60)
+        }
+    }
+
+    @Test(
+        "Real carbs entered 20 minutes ago, partly absorbed: counting them binds between 0 and stock"
+    ) func carbsPartlyAbsorbedBinds() throws {
+        var testCase = Case(glucose: 150, delta: 6, bolus: dec("4.2"), bolusMinutesAgo: 45, smb: true)
+        testCase.carbs = 45
+        testCase.carbsMinutesAgo = 20
+        testCase.countCarbs = true
+        let pair = try run(testCase)
+        let onCarbs = try #require(pair.onCarbs)
+        // COB 34.768 g after absorption, IOB 3.611: naive 150 - 90.275 = 59.7, rounded 60;
+        // ignoring carbs (60 - 90) / 25 = -1.2, so 0; counting them -1.2 + 34.768 / 10 = 2.2768, floored 2.27
+        #expect(onCarbs.mealCOB == dec("34.768"))
+        #expect(pair.off.determination.insulinReq == dec("2.72"))
+        #expect(pair.on.determination.insulinReq == 0)
+        #expect(onCarbs.determination.insulinReq == dec("2.27"))
+        #expect(onCarbs.determination.reason.contains("Eventual BG 214 >= 90, IOB+carbs limit 2.72→2.27, "))
+        // maxBolus 0.5 caps both microboluses; ignoring carbs gives none
+        #expect(pair.off.determination.units == 0.5)
+        #expect(onCarbs.determination.units == 0.5)
+        #expect(pair.on.determination.units == nil)
+        // the stock SMB low temp of 0.97 U/h for 30 minutes in all three
+        for outcome in [pair.off, pair.on, onCarbs] {
+            #expect(outcome.determination.rate == dec("0.97"))
+            #expect(outcome.determination.duration == 30)
+        }
+        let carbsOnly = try #require(pair.carbsOnly)
+        #expect(carbsOnly.determination.reason == pair.off.determination.reason)
+    }
+
+    @Test(
+        "Real carbs too few to cover what is on board: counting them still limits to 0, with the IOB+carbs marker"
+    ) func carbsCountedStillZero() throws {
+        var testCase = Case(glucose: 190, delta: 6, bolus: 6, bolusMinutesAgo: 45, smb: true)
+        testCase.carbs = 10
+        testCase.carbsMinutesAgo = 5
+        testCase.countCarbs = true
+        let pair = try run(testCase)
+        let onCarbs = try #require(pair.onCarbs)
+        // COB 10 g, IOB 5.159: naive 190 - 5.159 x 25 = 61.0, rounded 61; (61 - 90) / 25 = -1.16, plus 10 / 10 = -0.16,
+        // so the room is still 0
+        #expect(onCarbs.mealCOB == 10)
+        #expect(pair.off.determination.iob == dec("5.159"))
+        #expect(pair.off.determination.insulinReq == dec("0.32"))
+        #expect(pair.off.determination.units == dec("0.15"))
+        #expect(pair.on.determination.insulinReq == 0)
+        #expect(pair.on.determination.reason.contains("IOB limit 0.32→0, "))
+        #expect(onCarbs.determination.insulinReq == 0)
+        #expect(onCarbs.determination.reason.contains("IOB+carbs limit 0.32→0, "))
+        #expect(onCarbs.determination.units == nil)
+        // apart from the marker, carbs counted and ignored are the same determination here, with stock's low temp
+        #expect(
+            onCarbs.determination.reason.replacingOccurrences(of: "IOB+carbs limit", with: "IOB limit") ==
+                pair.on.determination.reason
+        )
+        for outcome in [pair.off, pair.on, onCarbs] {
+            #expect(outcome.determination.rate == dec("0.83"))
+            #expect(outcome.determination.duration == 30)
+        }
+    }
+}
+
+/// SPEC-2's worked example through DeterminationGenerator.determineBasal: glucose 110, IOB 3.8 (naive exactly
+/// 110 - 3.8 x 25 = 15), ISF 25, target 90, COB 45 g, carb ratio 9.5.
+enum IobLimitOwnerExample {
+    static let now = Date(timeIntervalSince1970: 1_781_000_000)
+
+    static func determination(delta: Decimal, limit: Bool, countCarbs: Bool) throws -> Determination {
+        var profile = Profile()
+        profile.currentBasal = 1
+        profile.maxDailyBasal = 1
+        profile.maxBasal = 3
+        profile.minBg = 90
+        profile.maxBg = 90
+        profile.targetBg = 90
+        profile.sens = 25
+        profile.carbRatio = dec("9.5")
+        profile.thresholdSetting = 70
+        profile.maxIob = 8
+        profile.enableSMBAlways = true
+        profile.enableUAM = true
+        profile.bolusIncrement = dec("0.05")
+        profile.smbDeliveryRatio = dec("0.5")
+        profile.supportedBasalRates = PumpRateTables.flat
+
+        var preferences = Preferences()
+        preferences.iobLimitsInsulinReq = limit
+        preferences.iobLimitCountsCarbs = countCarbs
+
+        let iob0 = dec("3.8")
+        let lastTempStart = now.addingTimeInterval(-3600)
+        let iobData: [IobResult] = (0 ..< 48).map { step in
+            let fraction = Decimal(48 - step) / 48
+            let iob = iob0 * fraction * fraction
+            let activity = iob0 * 2 * fraction / (48 * 5)
+            let time = now.addingTimeInterval(Double(step * 300))
+            return IobResult(
+                iob: iob,
+                activity: activity,
+                basaliob: 0,
+                bolusiob: iob,
+                netbasalinsulin: 0,
+                bolusinsulin: 0,
+                time: time,
+                iobWithZeroTemp: IobResult.IobWithZeroTemp(
+                    iob: iob - Decimal(step) * 5 / 60 / 2,
+                    activity: activity,
+                    basaliob: 0,
+                    bolusiob: iob,
+                    netbasalinsulin: 0,
+                    bolusinsulin: 0,
+                    time: time
+                ),
+                lastBolusTime: step == 0 ? UInt64(now.addingTimeInterval(-1800).timeIntervalSince1970 * 1000) : nil,
+                lastTemp: step == 0 ? IobResult.LastTemp(
+                    rate: 0,
+                    timestamp: lastTempStart,
+                    started_at: lastTempStart,
+                    date: UInt64(lastTempStart.timeIntervalSince1970 * 1000),
+                    duration: 30
+                ) : nil
+            )
+        }
+        let mealData = ComputedCarbs(
+            carbs: 50,
+            mealCOB: 45,
+            currentDeviation: delta,
+            maxDeviation: delta,
+            minDeviation: 0,
+            slopeFromMaxDeviation: 0,
+            slopeFromMinDeviation: 0,
+            allDeviations: [0, 1, 2, 3, 4],
+            lastCarbTime: now.addingTimeInterval(-20 * 60).timeIntervalSince1970 * 1000
+        )
+        let glucoseStatus = GlucoseStatus(
+            delta: delta,
+            glucose: 110,
+            noise: 1,
+            shortAvgDelta: delta,
+            longAvgDelta: delta,
+            date: now,
+            lastCalIndex: nil,
+            device: "test"
+        )
+        let determination = try DeterminationGenerator.determineBasal(
+            profile: profile,
+            preferences: preferences,
+            currentTemp: TempBasal(duration: 0, rate: 0, temp: .absolute, timestamp: now),
+            iobData: iobData,
+            mealData: mealData,
+            autosensData: Autosens(ratio: 1, newisf: nil),
+            reservoirData: 100,
+            glucoseStatus: glucoseStatus,
+            microBolusAllowed: true,
+            trioCustomOrefVariables: ParityInputs.orefVariables(clock: now),
+            currentTime: now
+        )
+        return try #require(determination)
+    }
 }
 
 @Suite("IOB limit: on never gives more than off") struct IobLimitInvariantTests {
     private typealias Case = IobLimitPipeline.Case
 
+    /// One slice of the sweep; the slices run in parallel.
+    struct SweepPart: CustomStringConvertible, Sendable {
+        /// nil: the turning traces
+        let glucose: Int?
+        let carbs: Bool
+        let smb: Bool
+
+        var description: String {
+            "\(glucose.map { "glucose \($0)" } ?? "turning traces")\(carbs ? " with carbs" : "")" +
+                (glucose == nil ? "" : smb ? ", SMB on" : ", SMB off")
+        }
+    }
+
+    static let sweepParts: [SweepPart] = [130, 190].flatMap { glucose in
+        [false, true].flatMap { carbs in [true, false].map { SweepPart(glucose: glucose, carbs: carbs, smb: $0) } }
+    } + [SweepPart(glucose: nil, carbs: false, smb: true), SweepPart(glucose: nil, carbs: true, smb: true)]
+
     /// What this sweep adds over the randomized tests below: real ProfileGenerator, IobGenerator, MealGenerator
-    /// and glucose-status output feeding the generator, and the plumbing check in `IobLimitPipeline.check`.
-    /// The randomized tests carry the breadth (COB, dynamic ISF, short temps, skip-neutral cancels, waiting SMBs).
+    /// (including carb entries) and glucose-status output feeding the generator, all four combinations of the two
+    /// preferences in every case, and the plumbing check in `IobLimitPipeline.check`. The randomized tests carry
+    /// the breadth (dynamic ISF, short temps, skip-neutral cancels, waiting SMBs).
     @Test(
-        "Sweep through the whole pipeline: units and effective rate on <= off",
-        arguments: ["glucose 130", "glucose 190", "turning traces"]
-    ) func sweep(part: String) throws {
+        "Sweep through the whole pipeline, all four preference combinations: never above stock",
+        arguments: sweepParts
+    ) func sweep(part: SweepPart) throws {
         var stats = IobLimitPipeline.Stats()
         let cache = IobLimitPipeline.Cache()
         let started = Date()
@@ -2222,48 +2826,68 @@ enum IobLimitPipeline {
             let pair = try IobLimitPipeline.run(testCase, cache: cache)
             IobLimitPipeline.check(pair, stats: &stats)
         }
-        print("IOB limit sweep \(part): \(stats) in \(Int(Date().timeIntervalSince(started)))s")
+        print("IOB limit sweep \(part): \(stats) in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
+        #expect(stats.carbsCases == stats.cases, "\(stats)")
         #expect(stats.bound * 10 > stats.cases, "\(stats)")
         #expect(stats.boundToZero > 0, "\(stats)")
         #expect(stats.unitsReduced + stats.rateLowered > 0, "\(stats)")
+        if part.carbs {
+            // counting the entered carbs must matter: it changes insulinReq in a good share of cases, and what the
+            // pump does several times, and binds with the IOB+carbs marker
+            #expect(stats.carbsChangedResult * 5 >= stats.cases, "\(stats)")
+            #expect(stats.carbsChangedDosing >= 5, "\(stats)")
+            if part.smb, part.glucose != nil {
+                #expect(stats.carbsMarker >= 3, "\(stats)")
+            }
+        } else {
+            // no carbs entered: counting them changes nothing
+            #expect(stats.carbsChangedResult == 0, "\(stats)")
+        }
     }
 
-    private static func sweepCases(_ part: String) -> [Case] {
+    private static func sweepCases(_ part: SweepPart) -> [Case] {
         var cases: [Case] = []
-        if part == "turning traces" {
+        guard let glucose = part.glucose else {
             // rose, then turned down at the last reading: the IOB forecast falls below naive while the averaged
             // deviation still lifts eventual glucose, the shape that pairs a limited microbolus with an SMB low temp
-            for glucose in stride(from: 120, through: 200, by: 4) {
+            for glucose in stride(from: 120, through: 200, by: 8) {
                 for bolus: (units: Decimal, minutesAgo: Int) in [(4, 45), (2, 60)] {
                     for lastDelta in [-5, -10] {
-                        cases.append(Case(
+                        var testCase = Case(
                             glucose: glucose,
                             delta: 8,
                             lastDelta: lastDelta,
                             bolus: bolus.units,
                             bolusMinutesAgo: bolus.minutesAgo,
                             smb: true
-                        ))
+                        )
+                        testCase.countCarbs = true
+                        if part.carbs {
+                            testCase.carbs = 30
+                            testCase.carbsMinutesAgo = 30
+                        }
+                        cases.append(testCase)
                     }
                 }
             }
             return cases
         }
 
-        let glucose = part == "glucose 130" ? 130 : 190
-        // bolus or zero temps for IOB of about 0, 1.8, 4.5 and -1 U
-        let iobSetups: [(bolus: Decimal, minutesAgo: Int, zeroTempHours: Int)] = [(0, 60, 0), (2, 60, 0), (5, 45, 0), (0, 60, 2)]
+        // bolus or zero temps for IOB of about 1.8, 4.5 and -1 U
+        let iobSetups: [(bolus: Decimal, minutesAgo: Int, zeroTempHours: Int)] = [(2, 60, 0), (5, 45, 0), (0, 60, 2)]
         // none, high, within the close-enough band of basal (low temps are in the randomized tests)
         let runningTemps: [(rate: Decimal?, minutesAgo: Int)] = [(nil, 0), (2.5, 5), (1.1, 5)]
         let variants: [(tempTarget: Decimal?, overrideTarget: Decimal?, autosensRatio: Decimal)] = [
             (nil, nil, 1), (120, nil, 1), (nil, 110, 1.2)
         ]
         for delta in [-3, 6] {
+            // with carbs: 45 g entered 20 minutes ago while rising, 30 g an hour ago while falling
+            let carbEntries: [(grams: Decimal, minutesAgo: Int)] = part.carbs ? [delta > 0 ? (45, 20) : (30, 60)] : [(0, 0)]
             for iobSetup in iobSetups {
                 for runningTemp in runningTemps {
-                    for smb in [true, false] {
-                        for variant in variants {
-                            cases.append(Case(
+                    for variant in variants {
+                        for carbEntry in carbEntries {
+                            var testCase = Case(
                                 glucose: glucose,
                                 delta: delta,
                                 bolus: iobSetup.bolus,
@@ -2271,12 +2895,16 @@ enum IobLimitPipeline {
                                 zeroTempHours: iobSetup.zeroTempHours,
                                 runningTemp: runningTemp.rate,
                                 runningTempMinutesAgo: runningTemp.minutesAgo,
-                                smb: smb,
+                                smb: part.smb,
                                 tempTarget: variant.tempTarget,
                                 overrideTarget: variant.overrideTarget,
                                 overridePercentage: variant.overrideTarget == nil ? 100 : 120,
                                 autosensRatio: variant.autosensRatio
-                            ))
+                            )
+                            testCase.carbs = carbEntry.grams
+                            testCase.carbsMinutesAgo = carbEntry.minutesAgo
+                            testCase.countCarbs = true
+                            cases.append(testCase)
                         }
                     }
                 }
@@ -2285,54 +2913,61 @@ enum IobLimitPipeline {
         return cases
     }
 
-    @Test("Every parity scenario, off vs on") func parityScenarios() throws {
+    @Test("Every parity scenario in all four combinations of the two preferences") func parityScenarios() throws {
         var stats = IobLimitPipeline.Stats()
         for name in ParityScenarios.allNames {
             let scenario = ParityScenarios.build(name)
-            var onPreferences = scenario.preferences
-            onPreferences.iobLimitsInsulinReq = true
-            let onScenario = ParityScenario(
-                name: scenario.name,
-                clock: scenario.clock,
-                glucose: scenario.glucose,
-                pumpHistory: scenario.pumpHistory,
-                carbs: scenario.carbs,
-                tempTargets: scenario.tempTargets,
-                preferences: onPreferences,
-                orefVariables: scenario.orefVariables,
-                currentTemp: scenario.currentTemp,
-                reservoir: scenario.reservoir,
-                pumpSettings: scenario.pumpSettings,
-                bgTargets: scenario.bgTargets,
-                basalProfile: scenario.basalProfile,
-                isf: scenario.isf,
-                carbRatios: scenario.carbRatios
-            )
-            let off = try ParityScenarios.runPipeline(scenario)
-            let on = try ParityScenarios.runPipeline(onScenario)
-            let offDetermination = try #require(off.determination, "\(name)")
-            let onDetermination = try #require(on.determination, "\(name)")
+            // the whole pipeline once; the preferences only reach the determination, so the other three
+            // combinations rerun its last step exactly as ParityScenarios.runPipeline does
+            let outputs = try ParityScenarios.runPipeline(scenario)
+            let meal = try #require(outputs.meal, "\(name)")
+            func outcome(limit: Bool, countCarbs: Bool) throws -> IobLimitPipeline.Outcome {
+                var preferences = scenario.preferences
+                preferences.iobLimitsInsulinReq = limit
+                preferences.iobLimitCountsCarbs = countCarbs
+                let determination = try DeterminationGenerator.generate(
+                    profile: outputs.profile,
+                    preferences: preferences,
+                    currentTemp: scenario.currentTemp,
+                    iobData: outputs.iob,
+                    mealData: meal,
+                    autosensData: outputs.autosens,
+                    reservoirData: scenario.reservoir,
+                    glucose: scenario.glucose,
+                    microBolusAllowed: true,
+                    trioCustomOrefVariables: scenario.orefVariables,
+                    currentTime: scenario.clock
+                )
+                let produced = try #require(determination, "\(name)")
+                return IobLimitPipeline.Outcome(
+                    determination: produced,
+                    currentTemp: scenario.currentTemp,
+                    profile: outputs.profile,
+                    orefVariables: scenario.orefVariables,
+                    mealCOB: meal.mealCOB
+                )
+            }
+            let off = try outcome(limit: false, countCarbs: false)
+            // the rerun reproduces the pipeline's own determination
+            let pipelineDetermination = try #require(outputs.determination, "\(name)")
+            #expect(off.determination.reason == pipelineDetermination.reason, "\(name)")
+            #expect(off.determination.rate == pipelineDetermination.rate, "\(name)")
+
             var testCase = IobLimitPipeline.Case()
             testCase.name = "parity scenario \(name)"
-            let pair = IobLimitPipeline.Pair(
-                testCase: testCase,
-                off: IobLimitPipeline.Outcome(
-                    determination: offDetermination,
-                    currentTemp: scenario.currentTemp,
-                    profile: off.profile,
-                    orefVariables: scenario.orefVariables
-                ),
-                on: IobLimitPipeline.Outcome(
-                    determination: onDetermination,
-                    currentTemp: scenario.currentTemp,
-                    profile: on.profile,
-                    orefVariables: scenario.orefVariables
-                )
+            let on = try outcome(limit: true, countCarbs: false)
+            var pair = IobLimitPipeline.Pair(testCase: testCase, off: off, on: on)
+            pair.carbsOnly = try outcome(limit: false, countCarbs: true)
+            pair.onCarbs = try outcome(limit: true, countCarbs: true)
+            print(
+                "IOB limit parity \(name): COB \(meal.mealCOB) | off \(pair.off.summary) | on \(pair.on.summary) | " +
+                    "on with carbs \(pair.onCarbs!.summary)"
             )
-            print("IOB limit parity \(name): off \(pair.off.summary) | on \(pair.on.summary)")
             IobLimitPipeline.check(pair, clock: scenario.clock, stats: &stats)
         }
         print("IOB limit parity scenarios: \(stats)")
+        #expect(stats.bound > 0, "\(stats)")
+        #expect(stats.carbsChangedResult > 0, "\(stats)")
     }
 }
 
@@ -2604,6 +3239,7 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
         var lowTempKeptByStockValue = 0, boundWithCob = 0, boundWithShortTemp = 0, boundWhileWaiting = 0
         var cancels = 0, unitsReduced = 0, rateLowered = 0
         var unitsViolations = 0, rateViolations = 0, offChanged = 0, notBindingChanged = 0, ruleViolations = 0
+        var carbsCounted = 0, carbsChangedLimit = 0, carbsChangedDosing = 0, carbsViolations = 0
         var examples: [String] = []
         func note(_ text: String) {
             if examples.count < 20 { examples.append(text) }
@@ -2615,6 +3251,8 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
 
             var stock: Decimal
             var limited: Decimal
+            // the limit with "IOB Limit Counts Carbs on Board" also on, when it went through calculateInsulinRequired
+            var limitedWithCarbs: Decimal?
             if rng.chance(50) {
                 // through calculateInsulinRequired, checked against the rule worked out with exact arithmetic
                 let base = blankDetermination(reason: "Autosens ratio: 1; ")
@@ -2658,6 +3296,49 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
                     ruleViolations += 1
                     note("RULE #\(index) stock \(stockValue) limited \(limited) rule \(ruleValue) \(inputs)")
                 }
+
+                // counting carbs on board, with the same COB and carb ratio the tail runs on
+                var withCarbs: [Bool: DosingEngine.InsulinRequirement] = [:]
+                for limit in [false, true] {
+                    withCarbs[limit] = DosingEngine.calculateInsulinRequired(
+                        minForecastGlucose: inputs.minPred,
+                        eventualGlucose: inputs.eventual,
+                        targetGlucose: inputs.target,
+                        adjustedSensitivity: inputs.sens,
+                        maxIob: inputs.maxIob,
+                        currentIob: inputs.iob,
+                        naiveEventualGlucose: inputs.naive,
+                        iobLimitsInsulinReq: limit,
+                        iobLimitCountsCarbs: true,
+                        carbsOnBoard: inputs.meal.mealCOB,
+                        carbRatio: inputs.carbRatio,
+                        determination: base
+                    )
+                }
+                let carbsOnly = withCarbs[false]!
+                let counted = withCarbs[true]!
+                let carbTerm = inputs.meal.mealCOB > 0 ? inputs.meal.mealCOB / inputs.carbRatio : 0
+                let carbsRuleValue = min(stockValue, max(0, (inputs.naive - inputs.target) / inputs.sens + carbTerm))
+                let form = carbTerm > 0 ? "IOB+carbs limit" : "IOB limit"
+                let carbsRuleBroken = carbsOnly.insulinRequired != stockValue ||
+                    !sameOutput(carbsOnly.determination, stockDetermination) ||
+                    counted.stockInsulinRequired != stockValue ||
+                    counted.insulinRequired < limited || counted.insulinRequired > stockValue ||
+                    counted.insulinRequired > carbsRuleValue || carbsRuleValue - counted.insulinRequired >= dec("0.01") ||
+                    (counted.insulinRequired == stockValue && !sameOutput(counted.determination, stockDetermination)) ||
+                    (counted.insulinRequired < stockValue && (
+                        counted.determination.insulinReq != counted.insulinRequired ||
+                            counted.determination.reason != stockDetermination.reason +
+                            "\(form) \(stockValue)→\(counted.insulinRequired), "
+                    ))
+                if carbsRuleBroken {
+                    carbsViolations += 1
+                    note(
+                        "CARBS RULE #\(index) stock \(stockValue) ignored \(limited) counted \(counted.insulinRequired) " +
+                            "rule \(carbsRuleValue) \(inputs)"
+                    )
+                }
+                limitedWithCarbs = counted.insulinRequired
             } else {
                 // any stock value, limited to 0, partly, not at all, or just below one microbolus
                 stock = rng.decimal(-100 ... 600, 100)
@@ -2680,6 +3361,7 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
             }
             if stock > 0, rng.chance(10) {
                 limited = 0
+                limitedWithCarbs = nil
             }
 
             let off = try inputs.tail(insulinRequired: stock, stock: stock)
@@ -2710,6 +3392,28 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
             }
             if on.determination.duration == 0 || off.determination.duration == 0 { cancels += 1 }
 
+            if let limitedWithCarbs {
+                carbsCounted += 1
+                let onCarbs = try inputs.tail(insulinRequired: limitedWithCarbs, stock: stock)
+                let unitsOnCarbs = onCarbs.determination.units ?? 0
+                let rateOnCarbs = effectiveRate(onCarbs.determination, running: inputs.currentTemp, scheduled: scheduled)
+                if unitsOnCarbs > unitsOff || rateOnCarbs > rateOff {
+                    carbsViolations += 1
+                    note("CARBS ABOVE STOCK units \(unitsOnCarbs) rate \(rateOnCarbs) " + label)
+                }
+                // carbs ignored <= carbs counted, in units and effective rate as well as in insulinReq
+                if unitsOn > unitsOnCarbs || rateOn > rateOnCarbs {
+                    carbsViolations += 1
+                    note("CARBS BELOW IGNORED units \(unitsOnCarbs) < \(unitsOn) or rate \(rateOnCarbs) < \(rateOn) " + label)
+                }
+                if limitedWithCarbs == stock, !sameOutput(onCarbs.determination, off.determination) {
+                    carbsViolations += 1
+                    note("CARBS NOT BINDING BUT DIFFERENT " + label)
+                }
+                if limitedWithCarbs > limited { carbsChangedLimit += 1 }
+                if unitsOnCarbs != unitsOn || rateOnCarbs != rateOn { carbsChangedDosing += 1 }
+            }
+
             guard limited < stock else {
                 notBound += 1
                 continue
@@ -2730,7 +3434,9 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
             "stock value \(lowTempKeptByStockValue); bound with COB \(boundWithCob), with a running temp of 1-20 min " +
             "\(boundWithShortTemp), while waiting to microbolus \(boundWhileWaiting); cancels \(cancels); violations: " +
             "units \(unitsViolations), rate \(rateViolations), off changed \(offChanged), not binding but different " +
-            "\(notBindingChanged), rule \(ruleViolations); \(Int(Date().timeIntervalSince(started) * 1000)) ms"
+            "\(notBindingChanged), rule \(ruleViolations), counting carbs \(carbsViolations); counting carbs: cases " +
+            "\(carbsCounted), changed the limit \(carbsChangedLimit), changed units or rate \(carbsChangedDosing); " +
+            "\(Int(Date().timeIntervalSince(started) * 1000)) ms"
         print("IOB limit tail randomized: " + summary)
         for example in examples {
             print("IOB limit tail randomized example: " + example)
@@ -2740,6 +3446,7 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
         #expect(offChanged == 0, "\(summary) \(examples)")
         #expect(notBindingChanged == 0, "\(summary) \(examples)")
         #expect(ruleViolations == 0, "\(summary) \(examples)")
+        #expect(carbsViolations == 0, "\(summary) \(examples)")
         // never vacuous: the limit must bind often, in every way that matters
         #expect(boundToZero * 10 >= cases, "\(summary)")
         #expect(boundPartly * 10 >= cases, "\(summary)")
@@ -2750,6 +3457,8 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
         #expect(boundWithShortTemp * 20 >= cases, "\(summary)")
         #expect(boundWhileWaiting * 100 >= cases, "\(summary)")
         #expect(cancels * 100 >= cases, "\(summary)")
+        #expect(carbsChangedLimit * 30 >= cases, "\(summary)")
+        #expect(carbsChangedDosing * 50 >= cases, "\(summary)")
     }
 }
 
@@ -2758,11 +3467,14 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
     /// temp targets, overrides, autosens, skip-neutral temps, short running temps, SMB interval waits.
     /// Each seed runs in parallel.
     @Test(
-        "Fixed-seed random determinations: on <= off, identical JSON when the limit does not bind",
-        arguments: [UInt64(0xC0FF_EE00_0000_0042), 0xC0FF_EE00_0000_0043, 0xC0FF_EE00_0000_0044, 0xC0FF_EE00_0000_0045]
+        "Fixed-seed random determinations, all four preference combinations: never above stock, identical when not binding",
+        arguments: [
+            UInt64(0xC0FF_EE00_0000_0042), 0xC0FF_EE00_0000_0043, 0xC0FF_EE00_0000_0044, 0xC0FF_EE00_0000_0045,
+            0xC0FF_EE00_0000_0046, 0xC0FF_EE00_0000_0047, 0xC0FF_EE00_0000_0048, 0xC0FF_EE00_0000_0049
+        ]
     ) func randomized(seed: UInt64) throws {
         var rng = IobLimitRandom(seed: seed)
-        let cases = 120
+        let cases = 60
         let started = Date()
         var stats = IobLimitPipeline.Stats()
         var threw = 0, dynamicBound = 0, cobBound = 0, jsonDifferences = 0
@@ -2786,7 +3498,9 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
                 profile.temptargetSet = true
             }
             profile.sens = rng.decimal(150 ... 1500, 10)
-            profile.carbRatio = rng.decimal(40 ... 200, 10)
+            // carb ratio 6-25 g/U and mostly modest COB below, so counting carbs often moves the limit without
+            // simply lifting it above stock
+            profile.carbRatio = rng.decimal(60 ... 250, 10)
             profile.thresholdSetting = rng.decimal(60 ... 90, 1)
             profile.maxIob = rng.decimal(0 ... 120, 10)
             profile.enableSMBAlways = rng.chance(60)
@@ -2803,12 +3517,14 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
 
             var preferences = Preferences()
             preferences.curve = .rapidActing
-            let dynamic = rng.chance(20)
+            let dynamic = rng.chance(40)
             preferences.useNewFormula = dynamic
             preferences.sigmoid = dynamic && rng.chance(50)
 
-            let glucose = rng.decimal(45 ... 380, 1)
-            let delta = rng.decimal(-150 ... 150, 10)
+            // half the cases rise after carbs with insulin on board, where counting carbs moves the limit
+            let risingAfterCarbs = rng.chance(50)
+            let glucose = risingAfterCarbs ? rng.decimal(120 ... 260, 1) : rng.decimal(45 ... 380, 1)
+            let delta = risingAfterCarbs ? rng.decimal(20 ... 120, 10) : rng.decimal(-150 ... 150, 10)
             let glucoseStatus = GlucoseStatus(
                 delta: delta,
                 glucose: glucose,
@@ -2821,7 +3537,14 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
             )
 
             // IOB decaying to 0 over 4 hours
-            let iob0 = rng.decimal(-200 ... 900, 100)
+            let iob0 = risingAfterCarbs ? rng.decimal(100 ... 600, 100) : rng.decimal(-200 ... 900, 100)
+            if risingAfterCarbs {
+                // room under max IOB, so stock gets as far as insulinReq, and an ISF that puts glucose - IOB x ISF
+                // within 40 of the target, where the limit and the carbs on board decide it
+                profile.maxIob = iob0 + rng.decimal(200 ... 600, 100)
+                let naive = (profile.minBg ?? target) + rng.decimal(-40 ... 40, 1)
+                profile.sens = max(10, ((glucose - naive) / iob0).rounded(scale: 1))
+            }
             let peakShift = rng.decimal(50 ... 200, 100)
             let duration: Int
             switch rng.int(0 ... 4) {
@@ -2878,7 +3601,7 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
             }
             let currentTemp = TempBasal(duration: duration, rate: tempRate, temp: .absolute, timestamp: now)
 
-            let cob: Decimal = rng.chance(60) ? 0 : rng.decimal(1 ... 100, 1)
+            let cob: Decimal = risingAfterCarbs ? rng.decimal(3 ... 20, 1) : rng.chance(25) ? 0 : rng.decimal(1 ... 40, 1)
             let lastCarbTime = cob > 0 ?
                 now.addingTimeInterval(-Double(rng.int(10 ... 180)) * 60).timeIntervalSince1970 * 1000 : 0
             let mealData = ComputedCarbs(
@@ -2918,9 +3641,10 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
                 uamMinutes: 30
             )
 
-            func determination(limit: Bool) throws -> Determination? {
+            func determination(limit: Bool, countCarbs: Bool = false) throws -> Determination? {
                 var runPreferences = preferences
                 runPreferences.iobLimitsInsulinReq = limit
+                runPreferences.iobLimitCountsCarbs = countCarbs
                 return try DeterminationGenerator.determineBasal(
                     profile: profile,
                     preferences: runPreferences,
@@ -2941,42 +3665,50 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
                 offResult = try determination(limit: false)
             } catch {
                 threw += 1
-                let onThrew = (try? determination(limit: true)) == nil
-                #expect(onThrew, "#\(index): off threw, on must too")
+                for combination in [(true, false), (false, true), (true, true)] {
+                    let threwToo = (try? determination(limit: combination.0, countCarbs: combination.1)) == nil
+                    #expect(threwToo, "#\(index): off threw, \(combination) must too")
+                }
                 continue
             }
             let onResult = try determination(limit: true)
+            let carbsOnlyResult = try determination(limit: false, countCarbs: true)
+            let onCarbsResult = try determination(limit: true, countCarbs: true)
             let off = try #require(offResult, "#\(index)")
             let on = try #require(onResult, "#\(index)")
+            let carbsOnly = try #require(carbsOnlyResult, "#\(index)")
+            let onCarbs = try #require(onCarbsResult, "#\(index)")
+            func outcome(_ determination: Determination) -> IobLimitPipeline.Outcome {
+                IobLimitPipeline.Outcome(
+                    determination: determination,
+                    currentTemp: currentTemp,
+                    profile: profile,
+                    orefVariables: orefVariables,
+                    mealCOB: mealData.mealCOB
+                )
+            }
 
             var testCase = IobLimitPipeline.Case()
             testCase.name = "seed \(String(seed, radix: 16)) #\(index) bg \(glucose) delta \(delta) iob \(iob0) " +
                 "temp \(tempRate)@\(duration)m cob \(cob) dynamic \(dynamic)"
-            let pair = IobLimitPipeline.Pair(
-                testCase: testCase,
-                off: IobLimitPipeline.Outcome(
-                    determination: off,
-                    currentTemp: currentTemp,
-                    profile: profile,
-                    orefVariables: orefVariables
-                ),
-                on: IobLimitPipeline.Outcome(
-                    determination: on,
-                    currentTemp: currentTemp,
-                    profile: profile,
-                    orefVariables: orefVariables
-                )
-            )
+            var pair = IobLimitPipeline.Pair(testCase: testCase, off: outcome(off), on: outcome(on))
+            pair.carbsOnly = outcome(carbsOnly)
+            pair.onCarbs = outcome(onCarbs)
             let boundBefore = stats.bound
+            let carbsBoundBefore = stats.carbsBound
             IobLimitPipeline.check(pair, clock: now, stats: &stats)
             if stats.bound > boundBefore {
                 if dynamic { dynamicBound += 1 }
                 if cob > 0 { cobBound += 1 }
-            } else {
-                // every encoded field identical, not just the dosing ones
-                let offJSON = try ParityHarness.normalizeDeterminationId(ParityHarness.canonicalJSON(off))
-                let onJSON = try ParityHarness.normalizeDeterminationId(ParityHarness.canonicalJSON(on))
-                if offJSON != onJSON || off.cobProjection != on.cobProjection {
+            }
+            // every encoded field identical to stock, not just the dosing ones, whenever a combination does not bind
+            let offJSON = try ParityHarness.normalizeDeterminationId(ParityHarness.canonicalJSON(off))
+            var unchanged = [carbsOnly]
+            if stats.bound == boundBefore { unchanged.append(on) }
+            if stats.carbsBound == carbsBoundBefore { unchanged.append(onCarbs) }
+            for determination in unchanged {
+                let json = try ParityHarness.normalizeDeterminationId(ParityHarness.canonicalJSON(determination))
+                if json != offJSON || determination.cobProjection != off.cobProjection {
                     jsonDifferences += 1
                 }
             }
@@ -2992,5 +3724,12 @@ private func sameOutput(_ lhs: Determination, _ rhs: Determination) -> Bool {
         #expect(stats.boundToZero > 0, "\(summary)")
         #expect(cobBound > 0, "\(summary)")
         #expect(dynamicBound > 0, "\(summary)")
+        // counting carbs must matter in each seed: it binds, changes insulinReq and what the pump does, and shows
+        // the IOB+carbs marker
+        // (observed per 60-case seed: binds 4-12, changes insulinReq 6-16 and units or rate 4-13, marker 3-11)
+        #expect(stats.carbsBound * 20 >= stats.cases, "\(summary)")
+        #expect(stats.carbsChangedResult * 12 >= stats.cases, "\(summary)")
+        #expect(stats.carbsChangedDosing >= 3, "\(summary)")
+        #expect(stats.carbsMarker >= 3, "\(summary)")
     }
 }

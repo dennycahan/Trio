@@ -56,6 +56,8 @@ struct Preferences: JSON, Equatable {
     /// Trio-only: insulin on board limits SMBs and high temps to what glucose − IOB × ISF still needs to reach
     /// target. Read straight from preferences by the determination, so profile.json is unchanged.
     var iobLimitsInsulinReq: Bool = false
+    /// Trio-only, needs `iobLimitsInsulinReq`: carbs on board widen that limit by COB / carb ratio.
+    var iobLimitCountsCarbs: Bool = false
 }
 
 extension Preferences {
@@ -112,6 +114,7 @@ extension Preferences {
         case threshold_setting
         case updateInterval
         case iobLimitsInsulinReq
+        case iobLimitCountsCarbs
     }
 }
 
@@ -334,6 +337,10 @@ extension Preferences: Decodable {
 
         if let iobLimitsInsulinReq = try? container.decode(Bool.self, forKey: .iobLimitsInsulinReq) {
             preferences.iobLimitsInsulinReq = iobLimitsInsulinReq
+        }
+
+        if let iobLimitCountsCarbs = try? container.decode(Bool.self, forKey: .iobLimitCountsCarbs) {
+            preferences.iobLimitCountsCarbs = iobLimitCountsCarbs
         }
 
         self = preferences

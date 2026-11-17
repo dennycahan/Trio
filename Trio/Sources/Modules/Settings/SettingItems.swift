@@ -138,13 +138,16 @@ enum SettingItems {
                 "Max SMB Basal Minutes",
                 "Max UAM SMB Basal Minutes",
                 "Max Allowed Glucose Rise for SMB",
-                "IOB Limits SMBs and High Temps"
+                "IOB Limits SMBs and High Temps",
+                "IOB Limit Counts Carbs on Board"
             ],
             scrollTargetLabels: [
                 "Enable SMB With Temporary Target": "Enable SMB With Temptarget",
                 "Allow SMB With High Temporary Target": "Allow SMB With High Temptarget",
                 "Max UAM SMB Basal Minutes": "Max UAM Basal Minutes",
-                "High Glucose Target": "Enable SMB With High Glucose"
+                "High Glucose Target": "Enable SMB With High Glucose",
+                // hidden while the IOB limit is off, so search lands on the limit's own toggle
+                "IOB Limit Counts Carbs on Board": "IOB Limits SMBs and High Temps"
             ],
             path: ["Algorithm", "Super Micro Bolus (SMB)"]
         ),

@@ -430,6 +430,15 @@ extension SettingsExport {
                     name: String(localized: "IOB Limits SMBs and High Temps"),
                     value: preferences.iobLimitsInsulinReq ? String(localized: "Enabled") : String(localized: "Disabled")
                 )
+                // shown only under the IOB limit, like High Glucose Target under its toggle
+                if preferences.iobLimitsInsulinReq {
+                    addSetting(
+                        category: algorithmCategory,
+                        subcategory: smbSubcategory,
+                        name: String(localized: "IOB Limit Counts Carbs on Board"),
+                        value: preferences.iobLimitCountsCarbs ? String(localized: "Enabled") : String(localized: "Disabled")
+                    )
+                }
 
                 // Dynamic Settings
                 let dynamicSubcategory = String(localized: "Dynamic Settings")
