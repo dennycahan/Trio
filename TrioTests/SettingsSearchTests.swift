@@ -12,6 +12,16 @@ import Testing
         #expect(match?.scrollLabel == "Dynamic ISF")
     }
 
+    @Test("Searching either IOB limit setting finds the Additionals screen at the limit's toggle") func searchIobLimit() {
+        for text in ["IOB Limits SMBs and High Temps", "IOB Limit Counts Carbs on Board"] {
+            let matches = SettingItems.filteredItems(searchText: text).filter { $0.matchedContent == text }
+            #expect(matches.count == 1, "\(text)")
+            #expect(matches.first?.settingItem.view == .algorithmAdvancedSettings, "\(text)")
+            // the carbs option is hidden while the limit is off, so both scroll to the limit's own toggle
+            #expect(matches.first?.scrollLabel == "IOB Limits SMBs and High Temps", "\(text)")
+        }
+    }
+
     @Test("All scrollTargetLabels have valid non-empty targets") func scrollTargetLabelsNonEmpty() {
         for item in SettingItems.allItems {
             guard let labels = item.scrollTargetLabels else { continue }

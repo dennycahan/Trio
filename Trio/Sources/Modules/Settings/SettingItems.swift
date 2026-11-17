@@ -137,17 +137,13 @@ enum SettingItems {
                 "Enable UAM",
                 "Max SMB Basal Minutes",
                 "Max UAM SMB Basal Minutes",
-                "Max Allowed Glucose Rise for SMB",
-                "IOB Limits SMBs and High Temps",
-                "IOB Limit Counts Carbs on Board"
+                "Max Allowed Glucose Rise for SMB"
             ],
             scrollTargetLabels: [
                 "Enable SMB With Temporary Target": "Enable SMB With Temptarget",
                 "Allow SMB With High Temporary Target": "Allow SMB With High Temptarget",
                 "Max UAM SMB Basal Minutes": "Max UAM Basal Minutes",
-                "High Glucose Target": "Enable SMB With High Glucose",
-                // hidden while the IOB limit is off, so search lands on the limit's own toggle
-                "IOB Limit Counts Carbs on Board": "IOB Limits SMBs and High Temps"
+                "High Glucose Target": "Enable SMB With High Glucose"
             ],
             path: ["Algorithm", "Super Micro Bolus (SMB)"]
         ),
@@ -187,6 +183,8 @@ enum SettingItems {
             searchContents: [
                 "Max Daily Safety Multiplier",
                 "Current Basal Safety Multiplier",
+                "IOB Limits SMBs and High Temps",
+                "IOB Limit Counts Carbs on Board",
                 "Use Custom Peak Time",
                 "Duration of Insulin Action", "DIA",
                 "Insulin Peak Time",
@@ -202,7 +200,9 @@ enum SettingItems {
             scrollTargetLabels: [
                 "Min 5m Carbimpact": "Min 5m Carb Impact",
                 "Remaining Carbs Fraction": "Remaining Carbs Percentage",
-                "Noisy CGM Target Multiplier": "Noisy CGM Target Increase"
+                "Noisy CGM Target Multiplier": "Noisy CGM Target Increase",
+                // hidden while the IOB limit is off, so search lands on the limit's own toggle
+                "IOB Limit Counts Carbs on Board": "IOB Limits SMBs and High Temps"
             ],
             path: ["Algorithm", "Additionals"]
         )

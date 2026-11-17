@@ -94,6 +94,63 @@ extension AlgorithmAdvancedSettings {
                     }
                 )
 
+                // Limits high temps as well as SMBs and applies with SMBs off, so it sits with the other limits on
+                // insulin delivery. The carbs sub-option shows only while the limit is on.
+                SettingInputSection(
+                    decimalValue: $decimalPlaceholder,
+                    booleanValue: $state.iobLimitsInsulinReq,
+                    shouldDisplayHint: $shouldDisplayHint,
+                    selectedVerboseHint: Binding(
+                        get: { selectedVerboseHint },
+                        set: {
+                            selectedVerboseHint = $0.map { AnyView($0) }
+                            hintLabel = String(localized: "IOB Limits SMBs and High Temps")
+                        }
+                    ),
+                    units: state.units,
+                    type: .boolean,
+                    label: String(localized: "IOB Limits SMBs and High Temps"),
+                    miniHint: String(
+                        localized: "Add insulin, by SMB or high temp, only up to what glucose minus IOB × ISF still needs to reach target."
+                    ),
+                    verboseHint:
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Default: OFF").bold()
+                        Text(
+                            "When enabled, the insulin already on board limits how much insulin Trio may add, both as SMBs and as high temp basals. Trio takes current glucose minus IOB × ISF, which is where glucose would end up from the insulin on board alone, and adds at most the insulin needed to bring that number down to target, even when a rising forecast asks for more. The rate of rise is left out of this limit on purpose, and so are carbs on board unless IOB Limit Counts Carbs on Board is on, so glucose may run somewhat higher during rises. When nothing more is allowed under this limit, Trio gives no SMB and sets no high temp basal; a temp basal that is already running slightly above basal may take a few minutes to end. It never makes Trio add more insulin than it otherwise would, it does not change how Trio lowers or stops insulin when glucose is falling or low, and it applies whether SMBs are enabled or not."
+                        )
+                    },
+                    headerText: String(localized: "Insulin On Board Limit")
+                )
+
+                if state.iobLimitsInsulinReq {
+                    SettingInputSection(
+                        decimalValue: $decimalPlaceholder,
+                        booleanValue: $state.iobLimitCountsCarbs,
+                        shouldDisplayHint: $shouldDisplayHint,
+                        selectedVerboseHint: Binding(
+                            get: { selectedVerboseHint },
+                            set: {
+                                selectedVerboseHint = $0.map { AnyView($0) }
+                                hintLabel = String(localized: "IOB Limit Counts Carbs on Board")
+                            }
+                        ),
+                        units: state.units,
+                        type: .boolean,
+                        label: String(localized: "IOB Limit Counts Carbs on Board"),
+                        miniHint: String(
+                            localized: "Let entered carbs widen the IOB limit by carbs on board divided by carb ratio."
+                        ),
+                        verboseHint:
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Default: OFF").bold()
+                            Text(
+                                "Only has an effect while IOB Limits SMBs and High Temps is on. When enabled, carbs on board, the entered carbs not yet absorbed, widen that limit by the insulin they still need: carbs on board divided by your carb ratio. This lets Trio add insulin for carbs you have entered, so it gives back some or all of what the limit holds off after a meal. Carbs entered to treat a low count as well, which can let Trio add insulin while it is still recovering from that low. Deviation and the rate of rise stay left out, and it never makes Trio add more insulin than it would with the limit off."
+                            )
+                        }
+                    )
+                }
+
                 SettingInputSection(
                     decimalValue: $state.insulinActionCurve,
                     booleanValue: $booleanPlaceholder,

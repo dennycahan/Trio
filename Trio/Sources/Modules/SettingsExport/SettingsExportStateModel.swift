@@ -424,21 +424,6 @@ extension SettingsExport {
                     value: String(format: "%.0f", (preferences.maxDeltaBGthreshold as NSDecimalNumber).doubleValue * 100),
                     unit: "%"
                 )
-                addSetting(
-                    category: algorithmCategory,
-                    subcategory: smbSubcategory,
-                    name: String(localized: "IOB Limits SMBs and High Temps"),
-                    value: preferences.iobLimitsInsulinReq ? String(localized: "Enabled") : String(localized: "Disabled")
-                )
-                // shown only under the IOB limit, like High Glucose Target under its toggle
-                if preferences.iobLimitsInsulinReq {
-                    addSetting(
-                        category: algorithmCategory,
-                        subcategory: smbSubcategory,
-                        name: String(localized: "IOB Limit Counts Carbs on Board"),
-                        value: preferences.iobLimitCountsCarbs ? String(localized: "Enabled") : String(localized: "Disabled")
-                    )
-                }
 
                 // Dynamic Settings
                 let dynamicSubcategory = String(localized: "Dynamic Settings")
@@ -560,6 +545,21 @@ extension SettingsExport {
                     ),
                     unit: "%"
                 )
+                addSetting(
+                    category: algorithmCategory,
+                    subcategory: additionalsSubcategory,
+                    name: String(localized: "IOB Limits SMBs and High Temps"),
+                    value: preferences.iobLimitsInsulinReq ? String(localized: "Enabled") : String(localized: "Disabled")
+                )
+                // listed only under the IOB limit, as the screen shows it only while the limit is on
+                if preferences.iobLimitsInsulinReq {
+                    addSetting(
+                        category: algorithmCategory,
+                        subcategory: additionalsSubcategory,
+                        name: String(localized: "IOB Limit Counts Carbs on Board"),
+                        value: preferences.iobLimitCountsCarbs ? String(localized: "Enabled") : String(localized: "Disabled")
+                    )
+                }
                 addSetting(
                     category: algorithmCategory,
                     subcategory: additionalsSubcategory,
