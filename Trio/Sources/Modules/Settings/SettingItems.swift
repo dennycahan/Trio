@@ -201,7 +201,7 @@ enum SettingItems {
                 "Min 5m Carbimpact": "Min 5m Carb Impact",
                 "Remaining Carbs Fraction": "Remaining Carbs Percentage",
                 "Noisy CGM Target Multiplier": "Noisy CGM Target Increase",
-                // hidden while the IOB limit is off, so search lands on the limit's own toggle
+                // a second toggle in the limit's card, hidden while the limit is off; the card scrolls by the limit's label
                 "IOB Limit Counts Carbs on Board": "IOB Limits SMBs and High Temps"
             ],
             path: ["Algorithm", "Additionals"]

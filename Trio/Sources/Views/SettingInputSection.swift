@@ -5,6 +5,9 @@ struct SettingInputSection<VerboseHint: View>: View {
         case decimal(String)
         case boolean
         case conditionalDecimal(String)
+        /// a toggle with a second toggle (`conditionalBooleanValue`, labelled `conditionalLabel`) nested under it
+        /// in the same card, shown while the first is on
+        case conditionalBoolean
 
         static func == (lhs: SettingInputSectionType, rhs: SettingInputSectionType) -> Bool {
             switch (lhs, rhs) {
@@ -14,6 +17,8 @@ struct SettingInputSection<VerboseHint: View>: View {
                 return lhsValue == rhsValue
             case let (.conditionalDecimal(lhsValue), .conditionalDecimal(rhsValue)):
                 return lhsValue == rhsValue
+            case (.conditionalBoolean, .conditionalBoolean):
+                return true
             default:
                 return false
             }
@@ -29,6 +34,8 @@ struct SettingInputSection<VerboseHint: View>: View {
     var type: SettingInputSectionType
     var label: String
     var conditionalLabel: String?
+    /// the nested toggle of `.conditionalBoolean`; unused by the other types
+    var conditionalBooleanValue: Binding<Bool> = .constant(false)
     var miniHint: String
     var verboseHint: VerboseHint
     var headerText: String?
@@ -71,6 +78,15 @@ struct SettingInputSection<VerboseHint: View>: View {
                                 )
                             }
                         }
+
+                    case .conditionalBoolean:
+                        VStack {
+                            toggleView(label: label, isOn: $booleanValue)
+                            if booleanValue {
+                                toggleView(label: conditionalLabel ?? label, isOn: conditionalBooleanValue)
+                            }
+                        }
+                        .disabled(isToggleDisabled)
                     }
 
                     hintSection(
